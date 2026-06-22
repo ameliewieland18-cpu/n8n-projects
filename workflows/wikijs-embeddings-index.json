@@ -1,0 +1,308 @@
+{
+  "updatedAt": "2026-05-07T00:00:00.000Z",
+  "createdAt": "2026-05-07T00:00:00.000Z",
+  "id": "WIKIJSKBINDEX01",
+  "name": "wikijs-embeddings-index",
+  "description": "Indexes published Wiki.js pages into Postgres/pgvector using OpenAI embeddings.",
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 0,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -1184,
+        0
+      ],
+      "id": "c89a5401-3700-4ec7-b3e7-0bf8c596bd49",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://wikijs:3000/graphql",
+        "authentication": "genericCredentialType",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { query: 'query ListPages { pages { list { id path title description locale createdAt updatedAt } } }' } }}",
+        "options": {},
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -736,
+        0
+      ],
+      "id": "a58a9282-6b9f-4d9a-a4e7-c95fedf6e563",
+      "name": "List Wiki.js pages",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WIKIJSAPIHEADER01",
+          "name": "Wiki.js API token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const response = items[0]?.json ?? {};\nif (Array.isArray(response.errors) && response.errors.length) {\n  const messages = response.errors.map((error) => error.message).join('; ');\n  throw new Error(`Wiki.js list pages GraphQL error: ${messages}`);\n}\n\nconst pages = response.data?.pages?.list ?? response.pages?.list;\nif (!Array.isArray(pages)) {\n  throw new Error('Wiki.js list pages response did not include data.pages.list. Check the GraphQL schema and API token.');\n}\n\nreturn pages\n  .filter((page) => page && page.id !== undefined && page.id !== null)\n  .filter((page) => page.isPublished !== false)\n  .map((page) => ({\n    json: {\n      page_id: String(page.id),\n      page_id_number: Number(page.id),\n      path: page.path ?? '',\n      title: page.title ?? page.path ?? `Wiki.js page ${page.id}`,\n      locale: page.locale ?? null,\n      description: page.description ?? null,\n      updated_at: page.updatedAt ?? null,\n      created_at: page.createdAt ?? null,\n    },\n  }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        0
+      ],
+      "id": "cfd81268-8511-41f0-b0f7-18ebbbdc4f60",
+      "name": "Extract page list"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://wikijs:3000/graphql",
+        "authentication": "genericCredentialType",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { query: 'query PageContent($id: Int!) { pages { single(id: $id) { id path title description content render locale editor createdAt updatedAt } } }', variables: { id: $json.page_id_number } } }}",
+        "options": {},
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -288,
+        0
+      ],
+      "id": "ab7c350b-7e12-4b86-920e-3c592d9a648e",
+      "name": "Fetch page content",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WIKIJSAPIHEADER01",
+          "name": "Wiki.js API token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "if (Array.isArray($json.errors) && $json.errors.length) {\n  const messages = $json.errors.map((error) => error.message).join('; ');\n  throw new Error(`Wiki.js page content GraphQL error: ${messages}`);\n}\n\nconst page = $json.data?.pages?.single ?? $json.pages?.single;\nif (!page) {\n  throw new Error('Wiki.js returned no page content. Check the page permissions and API token.');\n}\n\nconst wikiBaseUrl = 'http://localhost:3000';\nconst rawContent = page.content || page.render || '';\n\nconst stripHtml = (value) => String(value)\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<[^>]+>/g, ' ');\n\nconst normalizeText = (value) => stripHtml(value)\n  .replace(/```[\\s\\S]*?```/g, (block) => `\\n${block}\\n`)\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst hashText = (value) => {\n  let h1 = 0xdeadbeef;\n  let h2 = 0x41c6ce57;\n  for (let i = 0; i < value.length; i += 1) {\n    const ch = value.charCodeAt(i);\n    h1 = Math.imul(h1 ^ ch, 2654435761);\n    h2 = Math.imul(h2 ^ ch, 1597334677);\n  }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return `${(h2 >>> 0).toString(16).padStart(8, '0')}${(h1 >>> 0).toString(16).padStart(8, '0')}`;\n};\n\nconst chunkText = (text, maxLength = 1200, overlap = 180) => {\n  if (!text) return [];\n  const blocks = text.split(/\\n(?=#{1,6}\\s)|\\n\\n+/).map((block) => block.trim()).filter(Boolean);\n  const chunks = [];\n  let current = '';\n\n  const pushCurrent = () => {\n    const trimmed = current.trim();\n    if (trimmed) chunks.push(trimmed);\n    current = '';\n  };\n\n  for (const block of blocks) {\n    if (block.length > maxLength) {\n      pushCurrent();\n      for (let start = 0; start < block.length; start += maxLength - overlap) {\n        chunks.push(block.slice(start, start + maxLength).trim());\n      }\n      continue;\n    }\n\n    const candidate = current ? `${current}\\n\\n${block}` : block;\n    if (candidate.length > maxLength) {\n      pushCurrent();\n      current = block;\n    } else {\n      current = candidate;\n    }\n  }\n\n  pushCurrent();\n  return chunks;\n};\n\nconst text = normalizeText(rawContent);\nconst contentHash = hashText([page.id, page.path, page.updatedAt, text].join('\\n'));\nconst wikiUrl = wikiBaseUrl && page.path ? `${wikiBaseUrl}/${String(page.path).replace(/^\\/+/, '')}` : null;\nconst chunks = chunkText(text);\nconst indexedAt = new Date().toISOString();\n\nreturn chunks.map((chunk, index) => ({\n  json: {\n    page_id: String(page.id),\n    chunk_index: index,\n    chunk_count: chunks.length,\n    chunk_text: chunk,\n    path: page.path ?? '',\n    title: page.title ?? page.path ?? `Wiki.js page ${page.id}`,\n    wiki_url: wikiUrl,\n    last_seen_updated_at: page.updatedAt ?? null,\n    content_hash: contentHash,\n    indexed_at: indexedAt,\n    metadata: {\n      source: 'wikijs',\n      page_id: String(page.id),\n      path: page.path ?? '',\n      title: page.title ?? page.path ?? `Wiki.js page ${page.id}`,\n      wiki_url: wikiUrl,\n      locale: page.locale ?? null,\n      editor: page.editor ?? null,\n      created_at: page.createdAt ?? null,\n      updated_at: page.updatedAt ?? null,\n      chunk_index: index,\n      chunk_count: chunks.length,\n    },\n  },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -64,
+        0
+      ],
+      "id": "e164c6d1-3577-40eb-aa2e-985b2f57f089",
+      "name": "Prepare chunks"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'text-embedding-3-small', input: $json.chunk_text } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        160,
+        0
+      ],
+      "id": "bc4d145a-8101-4d03-a317-051aa5b2c15f",
+      "name": "Create embedding",
+      "credentials": {
+        "openAiApi": {
+          "id": "svzmjgh81jPE86xK",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH deleted AS (\n  DELETE FROM public.kb_chunks\n  WHERE page_id = '{{ $('Prepare chunks').item.json.page_id.replace(/'/g, \"''\") }}'\n    AND {{ $('Prepare chunks').item.json.chunk_index }} = 0\n), state AS (\n  INSERT INTO public.kb_index_state (\n    page_id,\n    path,\n    title,\n    wiki_url,\n    last_seen_updated_at,\n    last_indexed_at,\n    content_hash,\n    chunk_count\n  ) VALUES (\n    '{{ $('Prepare chunks').item.json.page_id.replace(/'/g, \"''\") }}',\n    '{{ $('Prepare chunks').item.json.path.replace(/'/g, \"''\") }}',\n    '{{ $('Prepare chunks').item.json.title.replace(/'/g, \"''\") }}',\n    NULLIF('{{ String($('Prepare chunks').item.json.wiki_url ?? '').replace(/'/g, \"''\") }}', ''),\n    NULLIF('{{ String($('Prepare chunks').item.json.last_seen_updated_at ?? '').replace(/'/g, \"''\") }}', '')::timestamptz,\n    now(),\n    '{{ $('Prepare chunks').item.json.content_hash.replace(/'/g, \"''\") }}',\n    {{ $('Prepare chunks').item.json.chunk_count }}\n  )\n  ON CONFLICT (page_id) DO UPDATE SET\n    path = EXCLUDED.path,\n    title = EXCLUDED.title,\n    wiki_url = EXCLUDED.wiki_url,\n    last_seen_updated_at = EXCLUDED.last_seen_updated_at,\n    last_indexed_at = now(),\n    content_hash = EXCLUDED.content_hash,\n    chunk_count = EXCLUDED.chunk_count\n  RETURNING page_id\n), inserted AS (\n  INSERT INTO public.kb_chunks (\n    page_id,\n    chunk_index,\n    chunk_text,\n    path,\n    title,\n    wiki_url,\n    content_hash,\n    metadata,\n    embedding\n  )\n  SELECT\n    state.page_id,\n    {{ $('Prepare chunks').item.json.chunk_index }},\n    '{{ $('Prepare chunks').item.json.chunk_text.replace(/'/g, \"''\") }}',\n    '{{ $('Prepare chunks').item.json.path.replace(/'/g, \"''\") }}',\n    '{{ $('Prepare chunks').item.json.title.replace(/'/g, \"''\") }}',\n    NULLIF('{{ String($('Prepare chunks').item.json.wiki_url ?? '').replace(/'/g, \"''\") }}', ''),\n    '{{ $('Prepare chunks').item.json.content_hash.replace(/'/g, \"''\") }}',\n    '{{ JSON.stringify($('Prepare chunks').item.json.metadata).replace(/'/g, \"''\") }}'::jsonb,\n    '[{{ $json.data[0].embedding.join(',') }}]'::vector\n  FROM state\n  ON CONFLICT (page_id, chunk_index) DO UPDATE SET\n    chunk_text = EXCLUDED.chunk_text,\n    path = EXCLUDED.path,\n    title = EXCLUDED.title,\n    wiki_url = EXCLUDED.wiki_url,\n    content_hash = EXCLUDED.content_hash,\n    metadata = EXCLUDED.metadata,\n    embedding = EXCLUDED.embedding,\n    updated_at = now()\n  RETURNING id\n)\nSELECT\n  inserted.id AS kb_chunk_id,\n  '{{ $('Prepare chunks').item.json.page_id.replace(/'/g, \"''\") }}' AS page_id,\n  {{ $('Prepare chunks').item.json.chunk_index }} AS chunk_index\nFROM inserted;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        384,
+        0
+      ],
+      "id": "ee02b4fc-ef56-410a-b37a-d09896f3561a",
+      "name": "Store chunk embedding",
+      "credentials": {
+        "postgres": {
+          "id": "1anx5Bs5A3ENj82X",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1184,
+        -160
+      ],
+      "id": "ed0f52e7-c55a-46e4-b00f-dcf0b095f18b",
+      "name": "Manual Trigger"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1184,
+        160
+      ],
+      "id": "81ea7a38-6881-4dc5-bf83-fc9d4266d19e",
+      "name": "Execute Workflow Trigger"
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "List Wiki.js pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "List Wiki.js pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Workflow Trigger": {
+      "main": [
+        [
+          {
+            "node": "List Wiki.js pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "List Wiki.js pages": {
+      "main": [
+        [
+          {
+            "node": "Extract page list",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract page list": {
+      "main": [
+        [
+          {
+            "node": "Fetch page content",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch page content": {
+      "main": [
+        [
+          {
+            "node": "Prepare chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare chunks": {
+      "main": [
+        [
+          {
+            "node": "Create embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create embedding": {
+      "main": [
+        [
+          {
+            "node": "Store chunk embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 3,
+  "versionId": "f21a4a89-c918-49aa-aaf9-a54d5d5f55ee"
+}

@@ -1,4 +1,5 @@
 .env
+.DS_Store
 local-files/*
 !local-files/.gitkeep
 !local-files/reports/
@@ -8,5 +9,7 @@ n8n-data/*
 !n8n-data/.gitkeep
 postgres-data/*
 !postgres-data/.gitkeep
+mathesar-data/*
+!mathesar-data/.gitkeep
 nocodb-data/*
 !nocodb-data/.gitkeep

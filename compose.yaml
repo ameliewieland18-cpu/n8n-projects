@@ -4,7 +4,7 @@ services:
     container_name: n8n
     restart: unless-stopped
     ports:
-      - "${N8N_PORT:-5678}:5678"
+      - "127.0.0.1:${N8N_PORT:-5678}:5678"
     environment:
       GENERIC_TIMEZONE: "${GENERIC_TIMEZONE:-Europe/Amsterdam}"
       TZ: "${TZ:-Europe/Amsterdam}"
@@ -17,42 +17,100 @@ services:
       - ./local-files:/files
       - ./workflows:/workflows
   postgres:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: postgres
     restart: unless-stopped
     ports:
       - "127.0.0.1:5432:5432"
     environment:
-      POSTGRES_DB: "${POSTGRES_DB:-appdb}"
+      POSTGRES_DB: "${POSTGRES_DB:-freelance}"
       POSTGRES_USER: "${POSTGRES_USER:-appuser}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-change-me-for-local-dev}"
+      PGDATA: "/var/lib/postgresql/data/pgdata"
     healthcheck:
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${POSTGRES_USER:-appuser} -d ${POSTGRES_DB:-appdb}",
+          "pg_isready -U ${POSTGRES_USER:-appuser} -d ${POSTGRES_DB:-freelance}",
         ]
       interval: 10s
       timeout: 5s
       retries: 5
     volumes:
       - ./postgres-data:/var/lib/postgresql/data
-  nocodb:
-    image: nocodb/nocodb:latest
-    container_name: nocodb
+      - ./schema:/docker-entrypoint-initdb.d:ro
+  wikijs:
+    image: ghcr.io/requarks/wiki:2
+    container_name: wikijs
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
     ports:
-      - "${NOCODB_PORT:-8080}:8080"
+      - "127.0.0.1:${WIKIJS_PORT:-3000}:3000"
     environment:
-      NC_DB: "pg://postgres:5432?u=${POSTGRES_USER:-appuser}&p=${POSTGRES_PASSWORD:-change-me-for-local-dev}&d=${POSTGRES_DB:-appdb}"
-      NC_AUTH_JWT_SECRET: "${NC_AUTH_JWT_SECRET:-change-me-for-anything-beyond-local-dev}"
-      NC_DISABLE_TELE: "true"
-      PORT: "8080"
+      DB_TYPE: "postgres"
+      DB_HOST: "postgres"
+      DB_PORT: "5432"
+      DB_USER: "${POSTGRES_USER:-appuser}"
+      DB_PASS: "${POSTGRES_PASSWORD:-change-me-for-local-dev}"
+      DB_NAME: "${WIKIJS_DB_NAME:-wiki}"
+  mathesar:
+    image: mathesar/mathesar:latest
+    container_name: mathesar
+    restart: unless-stopped
+    depends_on:
+      mathesar-db:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${MATHESAR_PORT:-8000}:8000"
+    environment:
+      DOMAIN_NAME: "${MATHESAR_DOMAIN_NAME:-http://localhost}"
+      DJANGO_SETTINGS_MODULE: "config.settings.production"
+      ALLOWED_HOSTS: "${MATHESAR_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      DEBUG: "false"
+      SECRET_KEY: "${MATHESAR_SECRET_KEY:-}"
+      WEB_CONCURRENCY: "${MATHESAR_WEB_CONCURRENCY:-3}"
+      POSTGRES_DB: "${MATHESAR_POSTGRES_DB:-mathesar_django}"
+      POSTGRES_USER: "${MATHESAR_POSTGRES_USER:-mathesar}"
+      POSTGRES_PASSWORD: "${MATHESAR_POSTGRES_PASSWORD:-mathesar}"
+      POSTGRES_HOST: "mathesar-db"
+      POSTGRES_PORT: "5432"
+      FILE_STORAGE_DICT: "{}"
+      OIDC_CONFIG_DICT: "{}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
     volumes:
-      - ./nocodb-data:/usr/app/data
+      - ./mathesar-data/static:/code/static
+      - ./mathesar-data/media:/code/.media
+      - ./mathesar-data/secrets:/code/.secrets
+  mathesar-db:
+    image: pgautoupgrade/pgautoupgrade:17-bookworm
+    container_name: mathesar-db
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: "${MATHESAR_POSTGRES_DB:-mathesar_django}"
+      POSTGRES_USER: "${MATHESAR_POSTGRES_USER:-mathesar}"
+      POSTGRES_PASSWORD: "${MATHESAR_POSTGRES_PASSWORD:-mathesar}"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${MATHESAR_POSTGRES_USER:-mathesar} -d ${MATHESAR_POSTGRES_DB:-mathesar_django}",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - ./mathesar-data/pgdata:/var/lib/postgresql/data
   gotenberg:
     image: gotenberg/gotenberg:8
     container_name: gotenberg
