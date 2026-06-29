@@ -13,6 +13,7 @@ This repository contains a simple Docker Compose setup for running `n8n`, `Wiki.
 - `schema/00_pgvector.sql`: enables the `pgvector` extension in the app database
 - `schema/01_wikijs.sh`: creates the Wiki.js database and enables its PostgreSQL extensions on first startup
 - `schema/02_kb_embeddings.sql`: creates the Wiki.js knowledge-base embedding tables
+- `schema/03_email_responder.sql`: creates the automatic email responder state and processed-message tables
 - `schema/freelance.sql`: core tables for the freelance assistant database
 - `schema/job_search.sql`: expected `job_search` table definition for the report workflow
 - `n8n-data/`: host folder for n8n state and SQLite data
@@ -92,6 +93,27 @@ Get-Content .\schema\02_kb_embeddings.sql -Raw | docker exec -i postgres psql -U
 ```
 
 Import or refresh workflows from the tracked `workflows/` folder as needed. The Wiki.js embedding workflow is stored at `workflows/wikijs-embeddings-index.json`.
+
+The `automatic-email-responder` workflow is stored at `workflows/automatic-email-responder.json`. It reads new unread messages from `hello.wieland.collective@gmail.com`, chunks the email body with the same chunking strategy as the Wiki.js embedding index, embeds each email chunk with OpenAI, scores those embeddings against `public.kb_chunks`, selects the top distinct Wiki.js pages, fetches those pages, asks GPT to draft a reply, sends the reply, and then marks the original message as `replied` in Postgres.
+
+The responder has two duplicate/old-mail guards:
+
+- The IMAP trigger is configured for `UNSEEN` messages and `trackLastMessageId`.
+- `public.email_responder_messages` has a unique `(mailbox, message_key)` constraint. The workflow must claim a message as `processing` before embeddings, GPT, or email sending can happen. After the SMTP send succeeds, the workflow updates the row to `replied`.
+
+`public.email_responder_state.respond_after` defines the old-email cutoff. Messages received before that timestamp are inserted as `skipped_old` and are not answered. Reset this baseline immediately before activating the responder if you want to guarantee that only messages received after activation can be answered:
+
+```powershell
+docker exec postgres psql -U appuser -d freelance -c "UPDATE public.email_responder_state SET respond_after = now(), updated_at = now() WHERE mailbox = 'hello.wieland.collective@gmail.com';"
+```
+
+The responder expects these n8n credentials:
+
+- `Gmail hello.wieland.collective IMAP`: IMAP, host `imap.gmail.com`, port `993`, SSL/TLS enabled, user `hello.wieland.collective@gmail.com`
+- `Gmail hello.wieland.collective SMTP`: SMTP, host `smtp.gmail.com`, port `465`, SSL/TLS enabled, user `hello.wieland.collective@gmail.com`
+- Existing `OpenAi account`, `Postgres account`, and `Wiki.js API token`
+
+Store the mailbox password or app password only in n8n credentials; do not put it in workflow JSON or Git.
 
 Telemetry diagnostics and version-check notifications are disabled for `n8n`.
 

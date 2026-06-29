@@ -1,0 +1,471 @@
+{
+  "updatedAt": "2026-06-29T00:00:00.000Z",
+  "createdAt": "2026-06-29T00:00:00.000Z",
+  "id": "AUTOEMAILRESPONDER01",
+  "name": "automatic-email-responder",
+  "description": "Fetches new Gmail messages, claims them in Postgres, embeds email chunks, ranks distinct Wiki.js pages from the pgvector knowledge base, asks GPT to draft a reply, sends it, and marks the message as replied.",
+  "active": false,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "format": "simple",
+        "downloadAttachments": false,
+        "options": {
+          "customEmailConfig": "[\"UNSEEN\"]",
+          "forceReconnect": 60,
+          "trackLastMessageId": true
+        }
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -2208,
+        0
+      ],
+      "id": "73b3f154-b263-442d-8913-eadf45ba95ba",
+      "name": "New email received",
+      "credentials": {
+        "imap": {
+          "id": "GMAIL_HELLO_WIELAND_IMAP",
+          "name": "Gmail hello.wieland.collective IMAP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const ACCOUNT_EMAIL = 'hello.wieland.collective@gmail.com';\n\nconst stripHtml = (value) => String(value ?? '')\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<br\\s*\\/?>/gi, '\\n')\n  .replace(/<\\/p>/gi, '\\n\\n')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\");\n\nconst normalizeWhitespace = (value) => String(value ?? '')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst hashText = (value) => {\n  let h1 = 0xdeadbeef;\n  let h2 = 0x41c6ce57;\n  for (let i = 0; i < value.length; i += 1) {\n    const ch = value.charCodeAt(i);\n    h1 = Math.imul(h1 ^ ch, 2654435761);\n    h2 = Math.imul(h2 ^ ch, 1597334677);\n  }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return ((h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0'));\n};\n\nconst extractEmail = (value) => {\n  if (!value) return '';\n  if (typeof value === 'object') {\n    if (Array.isArray(value.value) && value.value[0]?.address) {\n      return String(value.value[0].address).toLowerCase();\n    }\n    if (value.address) return String(value.address).toLowerCase();\n    if (value.text) value = value.text;\n  }\n\n  const text = String(value);\n  const bracketAddress = text.match(/<([^>]+)>/);\n  const candidate = bracketAddress?.[1] ?? text;\n  const match = candidate.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\n  return match ? match[0].toLowerCase() : '';\n};\n\nconst parseDate = (value) => {\n  const parsed = value ? new Date(value) : new Date();\n  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;\n};\n\nconst senderEmail = extractEmail($json.from);\nif (!senderEmail) {\n  throw new Error('Incoming email did not include a parseable From address.');\n}\n\nif (senderEmail === ACCOUNT_EMAIL) {\n  return [];\n}\n\nconst textPlain = normalizeWhitespace($json.textPlain ?? '');\nconst textHtml = normalizeWhitespace(stripHtml($json.textHtml ?? ''));\nconst emailText = textPlain || textHtml;\n\nif (!emailText) {\n  throw new Error('Incoming email did not include a plain-text or HTML body to answer.');\n}\n\nconst originalSubject = normalizeWhitespace($json.subject ?? '(no subject)');\nconst replySubject = /^\\s*re:/i.test(originalSubject) ? originalSubject : 'Re: ' + originalSubject;\nconst messageId = normalizeWhitespace($json.metadata?.['message-id'] ?? $json.metadata?.messageId ?? $json.messageId ?? '');\nconst imapUid = $json.attributes?.uid ?? null;\nconst receivedAt = parseDate($json.date).toISOString();\nconst messageKey = messageId || ('imap-uid:' + String(imapUid ?? 'none') + ':' + hashText([senderEmail, receivedAt, originalSubject, emailText].join('\\n')));\n\nconst fullEmail = [\n  'From: ' + ($json.from ?? senderEmail),\n  'To: ' + ($json.to ?? ACCOUNT_EMAIL),\n  'Date: ' + receivedAt,\n  'Subject: ' + originalSubject,\n  '',\n  emailText,\n].join('\\n');\n\nconst emailPayload = {\n  mailbox: ACCOUNT_EMAIL,\n  account_email: ACCOUNT_EMAIL,\n  sender_email: senderEmail,\n  sender_raw: $json.from ?? senderEmail,\n  to_raw: $json.to ?? ACCOUNT_EMAIL,\n  cc_raw: $json.cc ?? '',\n  received_at: receivedAt,\n  message_id: messageId,\n  message_key: messageKey,\n  original_subject: originalSubject,\n  reply_subject: replySubject,\n  email_text: emailText,\n  full_email: fullEmail,\n  imap_uid: imapUid,\n};\n\nreturn [{\n  json: {\n    ...emailPayload,\n    email_payload: emailPayload,\n    email_payload_sql: JSON.stringify(emailPayload).replace(/'/g, \"''\"),\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        0
+      ],
+      "id": "19f98941-057e-4f85-9b39-e08044277a84",
+      "name": "Normalize email"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH ensure_state AS (\n  INSERT INTO public.email_responder_state (mailbox, respond_after, top_k)\n  VALUES ('hello.wieland.collective@gmail.com', now(), 5)\n  ON CONFLICT (mailbox) DO NOTHING\n), state AS (\n  SELECT mailbox, respond_after, top_k\n  FROM public.email_responder_state\n  WHERE mailbox = 'hello.wieland.collective@gmail.com'\n), incoming AS (\n  SELECT\n    'hello.wieland.collective@gmail.com'::text AS mailbox,\n    '{{ $json.message_key.replace(/'/g, \"''\") }}'::text AS message_key,\n    NULLIF('{{ String($json.message_id ?? '').replace(/'/g, \"''\") }}', '') AS message_id,\n    NULLIF('{{ String($json.imap_uid ?? '').replace(/'/g, \"''\") }}', '')::bigint AS imap_uid,\n    '{{ $json.sender_email.replace(/'/g, \"''\") }}'::text AS sender_email,\n    '{{ String($json.sender_raw ?? '').replace(/'/g, \"''\") }}'::text AS sender_raw,\n    '{{ $json.original_subject.replace(/'/g, \"''\") }}'::text AS subject,\n    '{{ $json.received_at.replace(/'/g, \"''\") }}'::timestamptz AS received_at,\n    '{{ $json.email_payload_sql }}'::jsonb AS email_payload\n), skipped_old AS (\n  INSERT INTO public.email_responder_messages (\n    mailbox, message_key, message_id, imap_uid, sender_email, sender_raw,\n    subject, received_at, status, email_payload, updated_at\n  )\n  SELECT\n    incoming.mailbox, incoming.message_key, incoming.message_id, incoming.imap_uid,\n    incoming.sender_email, incoming.sender_raw, incoming.subject, incoming.received_at,\n    'skipped_old', incoming.email_payload, now()\n  FROM incoming\n  CROSS JOIN state\n  WHERE incoming.received_at < state.respond_after\n  ON CONFLICT (mailbox, message_key) DO NOTHING\n  RETURNING id, status\n), claimed AS (\n  INSERT INTO public.email_responder_messages (\n    mailbox, message_key, message_id, imap_uid, sender_email, sender_raw,\n    subject, received_at, status, email_payload, claimed_at, updated_at\n  )\n  SELECT\n    incoming.mailbox, incoming.message_key, incoming.message_id, incoming.imap_uid,\n    incoming.sender_email, incoming.sender_raw, incoming.subject, incoming.received_at,\n    'processing', incoming.email_payload, now(), now()\n  FROM incoming\n  CROSS JOIN state\n  WHERE incoming.received_at >= state.respond_after\n  ON CONFLICT (mailbox, message_key) DO NOTHING\n  RETURNING id, status\n), existing AS (\n  SELECT messages.id, messages.status\n  FROM public.email_responder_messages AS messages\n  JOIN incoming\n    ON messages.mailbox = incoming.mailbox\n   AND messages.message_key = incoming.message_key\n  LIMIT 1\n)\nSELECT\n  COALESCE((SELECT id FROM claimed), (SELECT id FROM skipped_old), (SELECT id FROM existing)) AS email_record_id,\n  EXISTS (SELECT 1 FROM claimed) AS should_reply,\n  COALESCE((SELECT status FROM claimed), (SELECT status FROM skipped_old), (SELECT status FROM existing), 'skipped_duplicate') AS status,\n  (SELECT top_k FROM state) AS top_k,\n  (SELECT respond_after FROM state) AS respond_after,\n  (SELECT email_payload FROM incoming) AS email_payload;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -1760,
+        0
+      ],
+      "id": "cb49857d-496a-4022-851e-47898a043df8",
+      "name": "Claim new email",
+      "credentials": {
+        "postgres": {
+          "id": "1anx5Bs5A3ENj82X",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "if (!$json.should_reply) {\n  return [];\n}\n\nconst parsePayload = (value) => {\n  if (!value) return {};\n  if (typeof value === 'string') return JSON.parse(value);\n  return value;\n};\n\nconst emailPayload = parsePayload($json.email_payload);\nemailPayload.top_k = Number($json.top_k ?? emailPayload.top_k ?? 5);\nemailPayload.email_record_id = $json.email_record_id;\n\nreturn [{\n  json: {\n    ...emailPayload,\n    email_payload: emailPayload,\n    email_payload_sql: JSON.stringify(emailPayload).replace(/'/g, \"''\"),\n    top_k: emailPayload.top_k,\n    email_record_id: $json.email_record_id,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1536,
+        0
+      ],
+      "id": "647e43c0-0656-4f12-a21d-a2f94ef6c5a2",
+      "name": "Continue only if claimed"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const stripHtml = (value) => String(value)\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<[^>]+>/g, ' ');\n\nconst normalizeText = (value) => stripHtml(value)\n  .replace(/\\x60\\x60\\x60[\\s\\S]*?\\x60\\x60\\x60/g, (block) => '\\n' + block + '\\n')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst chunkText = (text, maxLength = 1200, overlap = 180) => {\n  if (!text) return [];\n  const blocks = text.split(/\\n(?=#{1,6}\\s)|\\n\\n+/).map((block) => block.trim()).filter(Boolean);\n  const chunks = [];\n  let current = '';\n\n  const pushCurrent = () => {\n    const trimmed = current.trim();\n    if (trimmed) chunks.push(trimmed);\n    current = '';\n  };\n\n  for (const block of blocks) {\n    if (block.length > maxLength) {\n      pushCurrent();\n      for (let start = 0; start < block.length; start += maxLength - overlap) {\n        chunks.push(block.slice(start, start + maxLength).trim());\n      }\n      continue;\n    }\n\n    const candidate = current ? current + '\\n\\n' + block : block;\n    if (candidate.length > maxLength) {\n      pushCurrent();\n      current = block;\n    } else {\n      current = candidate;\n    }\n  }\n\n  pushCurrent();\n  return chunks;\n};\n\nconst emailPayload = $json.email_payload ?? $json;\nconst text = normalizeText(emailPayload.email_text ?? '');\nconst chunks = chunkText(text);\n\nif (!chunks.length) {\n  throw new Error('Email text produced zero chunks after normalization.');\n}\n\nreturn chunks.map((chunk, index) => ({\n  json: {\n    email_payload: emailPayload,\n    email_payload_sql: $json.email_payload_sql ?? JSON.stringify(emailPayload).replace(/'/g, \"''\"),\n    top_k: Number(emailPayload.top_k ?? 5),\n    chunk_index: index,\n    chunk_count: chunks.length,\n    chunk_text: chunk,\n  },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1312,
+        0
+      ],
+      "id": "95d960b9-9c57-4e07-9008-1636cfc3b6d3",
+      "name": "Prepare email chunks"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { model: 'text-embedding-3-small', input: $json.chunk_text } }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -1088,
+        0
+      ],
+      "id": "ef013d21-f8da-483c-9203-8518bc58f030",
+      "name": "Create email embedding",
+      "credentials": {
+        "openAiApi": {
+          "id": "svzmjgh81jPE86xK",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=WITH email_embedding AS (\n  SELECT '[{{ $json.data[0].embedding.join(',') }}]'::vector AS embedding\n), ranked_chunks AS (\n  SELECT\n    kb.page_id,\n    kb.path,\n    kb.title,\n    kb.wiki_url,\n    kb.chunk_index,\n    kb.chunk_text,\n    kb.embedding <=> email_embedding.embedding AS distance\n  FROM public.kb_chunks AS kb\n  CROSS JOIN email_embedding\n), best_chunk_per_page AS (\n  SELECT DISTINCT ON (page_id)\n    page_id,\n    path,\n    title,\n    wiki_url,\n    chunk_index,\n    chunk_text,\n    distance\n  FROM ranked_chunks\n  ORDER BY page_id, distance ASC\n)\nSELECT\n  '{{ $('Prepare email chunks').item.json.email_payload_sql }}'::jsonb AS email_payload,\n  {{ $('Prepare email chunks').item.json.chunk_index }}::integer AS email_chunk_index,\n  {{ $('Prepare email chunks').item.json.chunk_count }}::integer AS email_chunk_count,\n  {{ $('Prepare email chunks').item.json.top_k }}::integer AS top_k,\n  page_id,\n  path,\n  title,\n  wiki_url,\n  distance,\n  chunk_index AS matched_chunk_index,\n  chunk_text AS matched_chunk_text\nFROM best_chunk_per_page\nORDER BY distance ASC;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -864,
+        0
+      ],
+      "id": "27888a86-058f-4cf5-920f-90d70aa6c8a0",
+      "name": "Score KB pages",
+      "credentials": {
+        "postgres": {
+          "id": "1anx5Bs5A3ENj82X",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const rows = $input.all().map((item) => item.json);\nif (!rows.length) {\n  throw new Error('No knowledge-base rows were scored. Run wikijs-embeddings-index before enabling the responder.');\n}\n\nconst parsePayload = (value) => {\n  if (!value) return {};\n  if (typeof value === 'string') return JSON.parse(value);\n  return value;\n};\n\nconst emailPayload = parsePayload(rows[0].email_payload);\nconst topK = Number(rows[0].top_k ?? emailPayload.top_k ?? 5);\nconst bestByPage = new Map();\n\nfor (const row of rows) {\n  if (!row.page_id) continue;\n  const distance = Number(row.distance);\n  if (!Number.isFinite(distance)) continue;\n\n  const key = String(row.page_id);\n  const current = bestByPage.get(key);\n  if (!current || distance < current.best_distance) {\n    bestByPage.set(key, {\n      ...row,\n      page_id: key,\n      best_distance: distance,\n    });\n  }\n}\n\nconst rankedPages = [...bestByPage.values()]\n  .sort((a, b) => a.best_distance - b.best_distance);\n\nif (rankedPages.length < topK) {\n  throw new Error('Only ' + rankedPages.length + ' distinct Wiki.js pages were available, but top_k is ' + topK + '. Index more pages or lower top_k in public.email_responder_state.');\n}\n\nreturn rankedPages.slice(0, topK).map((page, index) => ({\n  json: {\n    email_payload: emailPayload,\n    top_k: topK,\n    rank: index + 1,\n    page_id: page.page_id,\n    page_id_number: Number(page.page_id),\n    path: page.path ?? '',\n    title: page.title ?? page.path ?? ('Wiki.js page ' + page.page_id),\n    wiki_url: page.wiki_url ?? null,\n    best_distance: page.best_distance,\n    matched_email_chunk_index: Number(page.email_chunk_index ?? 0),\n    matched_chunk_index: Number(page.matched_chunk_index ?? 0),\n    matched_chunk_text: page.matched_chunk_text ?? '',\n  },\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -640,
+        0
+      ],
+      "id": "ca0774ba-d8bb-4b6e-b35e-b987cb5e4e67",
+      "name": "Rank top K pages"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://wikijs:3000/graphql",
+        "authentication": "genericCredentialType",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { query: 'query PageContent($id: Int!) { pages { single(id: $id) { id path title description content render locale editor createdAt updatedAt } } }', variables: { id: $json.page_id_number } } }}",
+        "options": {},
+        "genericAuthType": "httpHeaderAuth"
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -416,
+        0
+      ],
+      "id": "4e27787a-cf3e-49af-afc8-97ed033c6390",
+      "name": "Fetch matched Wiki.js pages",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "WIKIJSAPIHEADER01",
+          "name": "Wiki.js API token"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const pageResponses = $input.all();\nconst rankedPages = $items('Rank top K pages').map((item) => item.json);\n\nif (!rankedPages.length) {\n  throw new Error('No ranked Wiki.js pages are available for the reply prompt.');\n}\n\nconst emailPayload = rankedPages[0].email_payload;\n\nconst stripHtml = (value) => String(value ?? '')\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<[^>]+>/g, ' ');\n\nconst normalizeText = (value) => stripHtml(value)\n  .replace(/\\x60\\x60\\x60[\\s\\S]*?\\x60\\x60\\x60/g, (block) => '\\n' + block + '\\n')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst contextPages = pageResponses.map((item, index) => {\n  const response = item.json ?? {};\n  if (Array.isArray(response.errors) && response.errors.length) {\n    const messages = response.errors.map((error) => error.message).join('; ');\n    throw new Error('Wiki.js page content GraphQL error: ' + messages);\n  }\n\n  const page = response.data?.pages?.single ?? response.pages?.single;\n  if (!page) {\n    throw new Error('Wiki.js returned no page content for a ranked page.');\n  }\n\n  const ranking = rankedPages[index] ?? rankedPages.find((candidate) => String(candidate.page_id) === String(page.id));\n  const content = normalizeText(page.content || page.render || '');\n\n  return {\n    rank: ranking?.rank ?? index + 1,\n    title: page.title ?? ranking?.title ?? page.path ?? ('Wiki.js page ' + page.id),\n    path: page.path ?? ranking?.path ?? '',\n    wiki_url: ranking?.wiki_url ?? null,\n    best_distance: ranking?.best_distance ?? null,\n    matched_email_chunk_index: ranking?.matched_email_chunk_index ?? null,\n    matched_chunk_index: ranking?.matched_chunk_index ?? null,\n    content,\n  };\n});\n\nconst knowledgeBaseContext = contextPages\n  .sort((a, b) => a.rank - b.rank)\n  .map((page) => [\n    '## ' + page.rank + '. ' + page.title,\n    'Path: ' + page.path,\n    page.wiki_url ? 'URL: ' + page.wiki_url : null,\n    page.best_distance !== null ? 'Best embedding distance: ' + page.best_distance : null,\n    page.matched_email_chunk_index !== null ? 'Matched email chunk: ' + page.matched_email_chunk_index : null,\n    page.matched_chunk_index !== null ? 'Matched KB chunk: ' + page.matched_chunk_index : null,\n    '',\n    page.content,\n  ].filter((line) => line !== null).join('\\n'))\n  .join('\\n\\n---\\n\\n');\n\nconst prompt = [\n  'You are replying on behalf of Wieland Collective from ' + emailPayload.account_email + '.',\n  '',\n  'Write a helpful email reply to the sender. Use the Wiki.js knowledge-base pages below as the factual context for the reply. Do not invent details that are not supported by the context or the incoming email. If the context does not answer a specific question, say that we will follow up. Keep the tone warm, concise, and professional. Match the incoming email language when practical. Return only the email body; do not include a subject line, markdown code fence, or analysis.',\n  '',\n  '# Retrieved Wiki.js Context (' + contextPages.length + ' distinct pages)',\n  knowledgeBaseContext,\n  '',\n  '# Incoming Email',\n  emailPayload.full_email,\n  '',\n  '# Reply Body',\n].join('\\n');\n\nreturn [{\n  json: {\n    email_payload: emailPayload,\n    to_email: emailPayload.sender_email,\n    from_email: emailPayload.account_email,\n    reply_subject: emailPayload.reply_subject,\n    original_subject: emailPayload.original_subject,\n    prompt,\n    matched_pages: contextPages,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -192,
+        0
+      ],
+      "id": "a1f27f6b-e3a6-48fb-a7cd-e952b972a50b",
+      "name": "Build reply prompt"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5.4",
+          "mode": "list",
+          "cachedResultName": "GPT-5.4"
+        },
+        "responses": {
+          "values": [
+            {
+              "content": "={{ $json.prompt }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.1,
+      "position": [
+        32,
+        0
+      ],
+      "id": "1347f48d-2d0f-48d2-bc30-f9552efebc2a",
+      "name": "Ask GPT to draft reply",
+      "credentials": {
+        "openAiApi": {
+          "id": "svzmjgh81jPE86xK",
+          "name": "OpenAi account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const promptItem = $items('Build reply prompt')[0]?.json;\nif (!promptItem) {\n  throw new Error('Missing reply prompt context.');\n}\n\nconst output = $json.output;\nlet replyBody = '';\n\nif (Array.isArray(output)) {\n  replyBody = output\n    .flatMap((entry) => entry.content ?? [])\n    .map((content) => content.text ?? '')\n    .join('\\n')\n    .trim();\n} else if (typeof output === 'string') {\n  replyBody = output.trim();\n} else if ($json.output_text) {\n  replyBody = String($json.output_text).trim();\n} else if ($json.text) {\n  replyBody = String($json.text).trim();\n}\n\nif (!replyBody) {\n  throw new Error('GPT returned an empty email reply.');\n}\n\nreturn [{\n  json: {\n    ...promptItem,\n    reply_body: replyBody,\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        256,
+        0
+      ],
+      "id": "08f2d728-989c-446a-9c9f-f530eb124dc0",
+      "name": "Prepare email reply"
+    },
+    {
+      "parameters": {
+        "resource": "email",
+        "operation": "send",
+        "fromEmail": "={{ $json.from_email }}",
+        "toEmail": "={{ $json.to_email }}",
+        "subject": "={{ $json.reply_subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.reply_body }}",
+        "options": {
+          "appendAttribution": false,
+          "replyTo": "hello.wieland.collective@gmail.com"
+        }
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        480,
+        0
+      ],
+      "id": "f6180b2f-e776-4027-ab4a-3822a38fb74c",
+      "name": "Send reply email",
+      "credentials": {
+        "smtp": {
+          "id": "GMAIL_HELLO_WIELAND_SMTP",
+          "name": "Gmail hello.wieland.collective SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "=UPDATE public.email_responder_messages\nSET\n  status = 'replied',\n  matched_pages = '{{ JSON.stringify($('Prepare email reply').item.json.matched_pages).replace(/'/g, \"''\") }}'::jsonb,\n  reply_subject = '{{ $('Prepare email reply').item.json.reply_subject.replace(/'/g, \"''\") }}',\n  reply_body = '{{ $('Prepare email reply').item.json.reply_body.replace(/'/g, \"''\") }}',\n  send_result = '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  replied_at = now(),\n  updated_at = now()\nWHERE mailbox = 'hello.wieland.collective@gmail.com'\n  AND message_key = '{{ $('Prepare email reply').item.json.email_payload.message_key.replace(/'/g, \"''\") }}'\nRETURNING id, mailbox, message_key, status, replied_at;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        704,
+        0
+      ],
+      "id": "1e84e9a8-b2f9-4035-98f0-a0b6ece8c36d",
+      "name": "Mark email replied",
+      "credentials": {
+        "postgres": {
+          "id": "1anx5Bs5A3ENj82X",
+          "name": "Postgres account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "New email received": {
+      "main": [
+        [
+          {
+            "node": "Normalize email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize email": {
+      "main": [
+        [
+          {
+            "node": "Claim new email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claim new email": {
+      "main": [
+        [
+          {
+            "node": "Continue only if claimed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Continue only if claimed": {
+      "main": [
+        [
+          {
+            "node": "Prepare email chunks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare email chunks": {
+      "main": [
+        [
+          {
+            "node": "Create email embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create email embedding": {
+      "main": [
+        [
+          {
+            "node": "Score KB pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score KB pages": {
+      "main": [
+        [
+          {
+            "node": "Rank top K pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Rank top K pages": {
+      "main": [
+        [
+          {
+            "node": "Fetch matched Wiki.js pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch matched Wiki.js pages": {
+      "main": [
+        [
+          {
+            "node": "Build reply prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build reply prompt": {
+      "main": [
+        [
+          {
+            "node": "Ask GPT to draft reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ask GPT to draft reply": {
+      "main": [
+        [
+          {
+            "node": "Prepare email reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare email reply": {
+      "main": [
+        [
+          {
+            "node": "Send reply email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send reply email": {
+      "main": [
+        [
+          {
+            "node": "Mark email replied",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "triggerCount": 1,
+  "versionId": "0941a90d-fb04-4f5f-a9e6-0bba9e66d29f"
+}
