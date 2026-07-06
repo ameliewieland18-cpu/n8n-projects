@@ -1,26 +1,29 @@
 {
-  "updatedAt": "2026-06-29T00:00:00.000Z",
+  "updatedAt": "2026-07-06T00:00:00.000Z",
   "createdAt": "2026-06-29T00:00:00.000Z",
   "id": "AUTOEMAILRESPONDER01",
   "name": "automatic-email-responder",
-  "description": "Fetches new Gmail messages, claims them in Postgres, embeds email chunks, ranks distinct Wiki.js pages from the pgvector knowledge base, asks GPT to draft a reply, sends it, and marks the message as replied.",
+  "description": "Fetches new Gmail messages over OAuth or accepts a manual test email, claims them in Postgres, embeds email chunks, ranks distinct Wiki.js pages from the pgvector knowledge base, asks GPT to draft a reply, sends it through Gmail OAuth, and marks the message as replied or failed.",
   "active": false,
   "isArchived": false,
   "nodes": [
     {
       "parameters": {
-        "mailbox": "INBOX",
-        "postProcessAction": "read",
-        "format": "simple",
-        "downloadAttachments": false,
+        "authentication": "oAuth2",
+        "event": "messageReceived",
+        "simple": false,
+        "filters": {
+          "q": "in:inbox -from:hello.wieland.collective@gmail.com",
+          "readStatus": "unread",
+          "includeSpamTrash": false,
+          "includeDrafts": false
+        },
         "options": {
-          "customEmailConfig": "[\"UNSEEN\"]",
-          "forceReconnect": 60,
-          "trackLastMessageId": true
+          "downloadAttachments": false
         }
       },
-      "type": "n8n-nodes-base.emailReadImap",
-      "typeVersion": 2.1,
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
       "position": [
         -2208,
         0
@@ -28,16 +31,41 @@
       "id": "73b3f154-b263-442d-8913-eadf45ba95ba",
       "name": "New email received",
       "credentials": {
-        "imap": {
-          "id": "GMAIL_HELLO_WIELAND_IMAP",
-          "name": "Gmail hello.wieland.collective IMAP"
+        "gmailOAuth2": {
+          "id": "GMAIL_HELLO_WIELAND_OAUTH2",
+          "name": "Gmail hello.wieland.collective OAuth2"
         }
       }
     },
     {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -2208,
+        240
+      ],
+      "id": "9a082c7f-3eba-4c1d-a2bc-0db64bb9f7c5",
+      "name": "Manual Trigger"
+    },
+    {
       "parameters": {
         "language": "javaScript",
-        "jsCode": "const ACCOUNT_EMAIL = 'hello.wieland.collective@gmail.com';\n\nconst stripHtml = (value) => String(value ?? '')\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<br\\s*\\/?>/gi, '\\n')\n  .replace(/<\\/p>/gi, '\\n\\n')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\");\n\nconst normalizeWhitespace = (value) => String(value ?? '')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst hashText = (value) => {\n  let h1 = 0xdeadbeef;\n  let h2 = 0x41c6ce57;\n  for (let i = 0; i < value.length; i += 1) {\n    const ch = value.charCodeAt(i);\n    h1 = Math.imul(h1 ^ ch, 2654435761);\n    h2 = Math.imul(h2 ^ ch, 1597334677);\n  }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return ((h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0'));\n};\n\nconst extractEmail = (value) => {\n  if (!value) return '';\n  if (typeof value === 'object') {\n    if (Array.isArray(value.value) && value.value[0]?.address) {\n      return String(value.value[0].address).toLowerCase();\n    }\n    if (value.address) return String(value.address).toLowerCase();\n    if (value.text) value = value.text;\n  }\n\n  const text = String(value);\n  const bracketAddress = text.match(/<([^>]+)>/);\n  const candidate = bracketAddress?.[1] ?? text;\n  const match = candidate.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\n  return match ? match[0].toLowerCase() : '';\n};\n\nconst parseDate = (value) => {\n  const parsed = value ? new Date(value) : new Date();\n  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;\n};\n\nconst senderEmail = extractEmail($json.from);\nif (!senderEmail) {\n  throw new Error('Incoming email did not include a parseable From address.');\n}\n\nif (senderEmail === ACCOUNT_EMAIL) {\n  return [];\n}\n\nconst textPlain = normalizeWhitespace($json.textPlain ?? '');\nconst textHtml = normalizeWhitespace(stripHtml($json.textHtml ?? ''));\nconst emailText = textPlain || textHtml;\n\nif (!emailText) {\n  throw new Error('Incoming email did not include a plain-text or HTML body to answer.');\n}\n\nconst originalSubject = normalizeWhitespace($json.subject ?? '(no subject)');\nconst replySubject = /^\\s*re:/i.test(originalSubject) ? originalSubject : 'Re: ' + originalSubject;\nconst messageId = normalizeWhitespace($json.metadata?.['message-id'] ?? $json.metadata?.messageId ?? $json.messageId ?? '');\nconst imapUid = $json.attributes?.uid ?? null;\nconst receivedAt = parseDate($json.date).toISOString();\nconst messageKey = messageId || ('imap-uid:' + String(imapUid ?? 'none') + ':' + hashText([senderEmail, receivedAt, originalSubject, emailText].join('\\n')));\n\nconst fullEmail = [\n  'From: ' + ($json.from ?? senderEmail),\n  'To: ' + ($json.to ?? ACCOUNT_EMAIL),\n  'Date: ' + receivedAt,\n  'Subject: ' + originalSubject,\n  '',\n  emailText,\n].join('\\n');\n\nconst emailPayload = {\n  mailbox: ACCOUNT_EMAIL,\n  account_email: ACCOUNT_EMAIL,\n  sender_email: senderEmail,\n  sender_raw: $json.from ?? senderEmail,\n  to_raw: $json.to ?? ACCOUNT_EMAIL,\n  cc_raw: $json.cc ?? '',\n  received_at: receivedAt,\n  message_id: messageId,\n  message_key: messageKey,\n  original_subject: originalSubject,\n  reply_subject: replySubject,\n  email_text: emailText,\n  full_email: fullEmail,\n  imap_uid: imapUid,\n};\n\nreturn [{\n  json: {\n    ...emailPayload,\n    email_payload: emailPayload,\n    email_payload_sql: JSON.stringify(emailPayload).replace(/'/g, \"''\"),\n  },\n}];"
+        "jsCode": "const now = new Date();\nconst runId = now.toISOString().replace(/[^0-9]/g, '');\nconst sender = 'hello.wieland.collective+manual-test@gmail.com';\n\nreturn [{\n  json: {\n    from: 'Manual Test <' + sender + '>',\n    to: 'hello.wieland.collective@gmail.com',\n    subject: 'Manual responder workflow test ' + now.toISOString(),\n    date: now.toISOString(),\n    textPlain: [\n      'Hello Wieland Collective,',\n      '',\n      'This is a manual test email for the automatic responder workflow.',\n      'Please answer as if I am asking what services you offer and how to start a project.',\n      '',\n      'Thanks!',\n      'Manual Test',\n    ].join('\\n'),\n    textHtml: '',\n    cc: '',\n    metadata: {\n      'message-id': '<manual-test-' + runId + '@n8n.local>',\n    },\n    attributes: {\n      uid: Number(runId.slice(-12)),\n    },\n  },\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1984,
+        240
+      ],
+      "id": "61ed9ae4-d4c1-4ce0-a75a-2db695b103b0",
+      "name": "Build manual test email"
+    },
+    {
+      "parameters": {
+        "language": "javaScript",
+        "jsCode": "const ACCOUNT_EMAIL = 'hello.wieland.collective@gmail.com';\n\nconst stripHtml = (value) => String(value ?? '')\n  .replace(/<script[\\s\\S]*?<\\/script>/gi, ' ')\n  .replace(/<style[\\s\\S]*?<\\/style>/gi, ' ')\n  .replace(/<br\\s*\\/?>/gi, '\\n')\n  .replace(/<\\/p>/gi, '\\n\\n')\n  .replace(/<[^>]+>/g, ' ')\n  .replace(/&nbsp;/g, ' ')\n  .replace(/&amp;/g, '&')\n  .replace(/&lt;/g, '<')\n  .replace(/&gt;/g, '>')\n  .replace(/&quot;/g, '\"')\n  .replace(/&#39;/g, \"'\");\n\nconst normalizeWhitespace = (value) => String(value ?? '')\n  .replace(/\\r\\n/g, '\\n')\n  .replace(/[\\t ]+/g, ' ')\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nconst hashText = (value) => {\n  let h1 = 0xdeadbeef;\n  let h2 = 0x41c6ce57;\n  for (let i = 0; i < value.length; i += 1) {\n    const ch = value.charCodeAt(i);\n    h1 = Math.imul(h1 ^ ch, 2654435761);\n    h2 = Math.imul(h2 ^ ch, 1597334677);\n  }\n  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);\n  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);\n  return ((h2 >>> 0).toString(16).padStart(8, '0') + (h1 >>> 0).toString(16).padStart(8, '0'));\n};\n\nconst extractEmail = (value) => {\n  if (!value) return '';\n  if (typeof value === 'object') {\n    if (Array.isArray(value.value) && value.value[0]?.address) {\n      return String(value.value[0].address).toLowerCase();\n    }\n    if (value.address) return String(value.address).toLowerCase();\n    if (value.text) value = value.text;\n  }\n\n  const text = String(value);\n  const bracketAddress = text.match(/<([^>]+)>/);\n  const candidate = bracketAddress?.[1] ?? text;\n  const match = candidate.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i);\n  return match ? match[0].toLowerCase() : '';\n};\n\nconst formatAddress = (value) => {\n  if (!value) return '';\n  if (typeof value === 'object') {\n    if (value.text) return String(value.text);\n    if (Array.isArray(value.value)) {\n      return value.value\n        .map((entry) => entry?.address ? (entry.name ? entry.name + ' <' + entry.address + '>' : entry.address) : '')\n        .filter(Boolean)\n        .join(', ');\n    }\n    if (value.address) return value.name ? value.name + ' <' + value.address + '>' : String(value.address);\n  }\n  return String(value);\n};\n\nconst parseDate = (value) => {\n  const parsed = value ? new Date(value) : new Date();\n  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;\n};\n\nconst senderEmail = extractEmail($json.from);\nif (!senderEmail) {\n  throw new Error('Incoming email did not include a parseable From address.');\n}\n\nif (senderEmail === ACCOUNT_EMAIL) {\n  return [];\n}\n\nconst textPlain = normalizeWhitespace($json.textPlain ?? $json.text ?? '');\nconst textHtml = normalizeWhitespace(stripHtml($json.textHtml ?? $json.html ?? $json.textAsHtml ?? ''));\nconst emailText = textPlain || textHtml;\n\nif (!emailText) {\n  throw new Error('Incoming email did not include a plain-text or HTML body to answer.');\n}\n\nconst originalSubject = normalizeWhitespace($json.subject ?? '(no subject)');\nconst replySubject = /^\\s*re:/i.test(originalSubject) ? originalSubject : 'Re: ' + originalSubject;\nconst messageId = normalizeWhitespace($json.metadata?.['message-id'] ?? $json.metadata?.messageId ?? $json.messageId ?? '');\nconst gmailId = normalizeWhitespace($json.id ?? '');\nconst gmailThreadId = normalizeWhitespace($json.threadId ?? '');\nconst imapUid = $json.attributes?.uid ?? null;\nconst receivedAt = parseDate($json.date).toISOString();\nconst messageKey = messageId || (gmailId ? 'gmail-id:' + gmailId : ('imap-uid:' + String(imapUid ?? 'none') + ':' + hashText([senderEmail, receivedAt, originalSubject, emailText].join('\\n'))));\nconst senderRaw = formatAddress($json.from) || senderEmail;\nconst toRaw = formatAddress($json.to) || ACCOUNT_EMAIL;\nconst ccRaw = formatAddress($json.cc);\n\nconst fullEmail = [\n  'From: ' + senderRaw,\n  'To: ' + toRaw,\n  'Date: ' + receivedAt,\n  'Subject: ' + originalSubject,\n  '',\n  emailText,\n].join('\\n');\n\nconst emailPayload = {\n  mailbox: ACCOUNT_EMAIL,\n  account_email: ACCOUNT_EMAIL,\n  sender_email: senderEmail,\n  sender_raw: senderRaw,\n  to_raw: toRaw,\n  cc_raw: ccRaw,\n  received_at: receivedAt,\n  message_id: messageId,\n  message_key: messageKey,\n  original_subject: originalSubject,\n  reply_subject: replySubject,\n  email_text: emailText,\n  full_email: fullEmail,\n  imap_uid: imapUid,\n  gmail_id: gmailId,\n  gmail_thread_id: gmailThreadId,\n};\n\nreturn [{\n  json: {\n    ...emailPayload,\n    email_payload: emailPayload,\n    email_payload_sql: JSON.stringify(emailPayload).replace(/'/g, \"''\"),\n  },\n}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -157,7 +185,7 @@
       "parameters": {
         "mode": "runOnceForAllItems",
         "language": "javaScript",
-        "jsCode": "const rows = $input.all().map((item) => item.json);\nif (!rows.length) {\n  throw new Error('No knowledge-base rows were scored. Run wikijs-embeddings-index before enabling the responder.');\n}\n\nconst parsePayload = (value) => {\n  if (!value) return {};\n  if (typeof value === 'string') return JSON.parse(value);\n  return value;\n};\n\nconst emailPayload = parsePayload(rows[0].email_payload);\nconst topK = Number(rows[0].top_k ?? emailPayload.top_k ?? 5);\nconst bestByPage = new Map();\n\nfor (const row of rows) {\n  if (!row.page_id) continue;\n  const distance = Number(row.distance);\n  if (!Number.isFinite(distance)) continue;\n\n  const key = String(row.page_id);\n  const current = bestByPage.get(key);\n  if (!current || distance < current.best_distance) {\n    bestByPage.set(key, {\n      ...row,\n      page_id: key,\n      best_distance: distance,\n    });\n  }\n}\n\nconst rankedPages = [...bestByPage.values()]\n  .sort((a, b) => a.best_distance - b.best_distance);\n\nif (rankedPages.length < topK) {\n  throw new Error('Only ' + rankedPages.length + ' distinct Wiki.js pages were available, but top_k is ' + topK + '. Index more pages or lower top_k in public.email_responder_state.');\n}\n\nreturn rankedPages.slice(0, topK).map((page, index) => ({\n  json: {\n    email_payload: emailPayload,\n    top_k: topK,\n    rank: index + 1,\n    page_id: page.page_id,\n    page_id_number: Number(page.page_id),\n    path: page.path ?? '',\n    title: page.title ?? page.path ?? ('Wiki.js page ' + page.page_id),\n    wiki_url: page.wiki_url ?? null,\n    best_distance: page.best_distance,\n    matched_email_chunk_index: Number(page.email_chunk_index ?? 0),\n    matched_chunk_index: Number(page.matched_chunk_index ?? 0),\n    matched_chunk_text: page.matched_chunk_text ?? '',\n  },\n}));"
+        "jsCode": "const rows = $input.all().map((item) => item.json);\nif (!rows.length) {\n  throw new Error('No knowledge-base rows were scored. Run wikijs-embeddings-index before enabling the responder.');\n}\n\nconst parsePayload = (value) => {\n  if (!value) return {};\n  if (typeof value === 'string') return JSON.parse(value);\n  return value;\n};\n\nconst emailPayload = parsePayload(rows[0].email_payload);\nconst topK = Number(rows[0].top_k ?? emailPayload.top_k ?? 5);\nconst bestByPage = new Map();\n\nfor (const row of rows) {\n  if (!row.page_id) continue;\n  const distance = Number(row.distance);\n  if (!Number.isFinite(distance)) continue;\n\n  const key = String(row.page_id);\n  const current = bestByPage.get(key);\n  if (!current || distance < current.best_distance) {\n    bestByPage.set(key, {\n      ...row,\n      page_id: key,\n      best_distance: distance,\n    });\n  }\n}\n\nconst rankedPages = [...bestByPage.values()]\n  .sort((a, b) => a.best_distance - b.best_distance);\n\nif (!rankedPages.length) {\n  throw new Error('No distinct Wiki.js pages were available. Run wikijs-embeddings-index before enabling the responder.');\n}\n\nconst effectiveTopK = Math.min(topK, rankedPages.length);\n\nreturn rankedPages.slice(0, effectiveTopK).map((page, index) => ({\n  json: {\n    email_payload: emailPayload,\n    top_k: topK,\n    available_page_count: rankedPages.length,\n    returned_page_count: effectiveTopK,\n    rank: index + 1,\n    page_id: page.page_id,\n    page_id_number: Number(page.page_id),\n    path: page.path ?? '',\n    title: page.title ?? page.path ?? ('Wiki.js page ' + page.page_id),\n    wiki_url: page.wiki_url ?? null,\n    best_distance: page.best_distance,\n    matched_email_chunk_index: Number(page.email_chunk_index ?? 0),\n    matched_chunk_index: Number(page.matched_chunk_index ?? 0),\n    matched_chunk_text: page.matched_chunk_text ?? '',\n  },\n}));"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,
@@ -266,20 +294,20 @@
     },
     {
       "parameters": {
-        "resource": "email",
+        "authentication": "oAuth2",
+        "resource": "message",
         "operation": "send",
-        "fromEmail": "={{ $json.from_email }}",
-        "toEmail": "={{ $json.to_email }}",
+        "sendTo": "={{ $json.to_email }}",
         "subject": "={{ $json.reply_subject }}",
-        "emailFormat": "text",
-        "text": "={{ $json.reply_body }}",
+        "emailType": "text",
+        "message": "={{ $json.reply_body }}",
         "options": {
           "appendAttribution": false,
           "replyTo": "hello.wieland.collective@gmail.com"
         }
       },
-      "type": "n8n-nodes-base.emailSend",
-      "typeVersion": 2.1,
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
       "position": [
         480,
         0
@@ -287,16 +315,17 @@
       "id": "f6180b2f-e776-4027-ab4a-3822a38fb74c",
       "name": "Send reply email",
       "credentials": {
-        "smtp": {
-          "id": "GMAIL_HELLO_WIELAND_SMTP",
-          "name": "Gmail hello.wieland.collective SMTP"
+        "gmailOAuth2": {
+          "id": "GMAIL_HELLO_WIELAND_OAUTH2",
+          "name": "Gmail hello.wieland.collective OAuth2"
         }
-      }
+      },
+      "continueOnFail": true
     },
     {
       "parameters": {
         "operation": "executeQuery",
-        "query": "=UPDATE public.email_responder_messages\nSET\n  status = 'replied',\n  matched_pages = '{{ JSON.stringify($('Prepare email reply').item.json.matched_pages).replace(/'/g, \"''\") }}'::jsonb,\n  reply_subject = '{{ $('Prepare email reply').item.json.reply_subject.replace(/'/g, \"''\") }}',\n  reply_body = '{{ $('Prepare email reply').item.json.reply_body.replace(/'/g, \"''\") }}',\n  send_result = '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  replied_at = now(),\n  updated_at = now()\nWHERE mailbox = 'hello.wieland.collective@gmail.com'\n  AND message_key = '{{ $('Prepare email reply').item.json.email_payload.message_key.replace(/'/g, \"''\") }}'\nRETURNING id, mailbox, message_key, status, replied_at;",
+        "query": "=UPDATE public.email_responder_messages\nSET\n  status = '{{ $json.error ? \"failed\" : \"replied\" }}',\n  matched_pages = '{{ JSON.stringify($('Prepare email reply').item.json.matched_pages).replace(/'/g, \"''\") }}'::jsonb,\n  reply_subject = '{{ $('Prepare email reply').item.json.reply_subject.replace(/'/g, \"''\") }}',\n  reply_body = '{{ $('Prepare email reply').item.json.reply_body.replace(/'/g, \"''\") }}',\n  send_result = '{{ JSON.stringify($json).replace(/'/g, \"''\") }}'::jsonb,\n  replied_at = CASE WHEN '{{ $json.error ? \"failed\" : \"replied\" }}' = 'replied' THEN now() ELSE replied_at END,\n  last_error = CASE\n    WHEN '{{ $json.error ? \"failed\" : \"replied\" }}' = 'failed'\n      THEN NULLIF('{{ String($json.error ?? '').replace(/'/g, \"''\") }}', '')\n    ELSE NULL\n  END,\n  updated_at = now()\nWHERE mailbox = 'hello.wieland.collective@gmail.com'\n  AND message_key = '{{ $('Prepare email reply').item.json.email_payload.message_key.replace(/'/g, \"''\") }}'\nRETURNING id, mailbox, message_key, status, replied_at, last_error;",
         "options": {}
       },
       "type": "n8n-nodes-base.postgres",
@@ -306,7 +335,7 @@
         0
       ],
       "id": "1e84e9a8-b2f9-4035-98f0-a0b6ece8c36d",
-      "name": "Mark email replied",
+      "name": "Mark email send outcome",
       "credentials": {
         "postgres": {
           "id": "1anx5Bs5A3ENj82X",
@@ -452,7 +481,29 @@
       "main": [
         [
           {
-            "node": "Mark email replied",
+            "node": "Mark email send outcome",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Trigger": {
+      "main": [
+        [
+          {
+            "node": "Build manual test email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build manual test email": {
+      "main": [
+        [
+          {
+            "node": "Normalize email",
             "type": "main",
             "index": 0
           }
@@ -466,6 +517,6 @@
   },
   "staticData": null,
   "tags": [],
-  "triggerCount": 1,
-  "versionId": "0941a90d-fb04-4f5f-a9e6-0bba9e66d29f"
+  "triggerCount": 2,
+  "versionId": "ef766a70-481b-403b-a1d1-acb64194408d"
 }

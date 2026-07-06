@@ -94,12 +94,15 @@ Get-Content .\schema\02_kb_embeddings.sql -Raw | docker exec -i postgres psql -U
 
 Import or refresh workflows from the tracked `workflows/` folder as needed. The Wiki.js embedding workflow is stored at `workflows/wikijs-embeddings-index.json`.
 
-The `automatic-email-responder` workflow is stored at `workflows/automatic-email-responder.json`. It reads new unread messages from `hello.wieland.collective@gmail.com`, chunks the email body with the same chunking strategy as the Wiki.js embedding index, embeds each email chunk with OpenAI, scores those embeddings against `public.kb_chunks`, selects the top distinct Wiki.js pages, fetches those pages, asks GPT to draft a reply, sends the reply, and then marks the original message as `replied` in Postgres.
+The `automatic-email-responder` workflow is stored at `workflows/automatic-email-responder.json`. It reads new unread messages from `hello.wieland.collective@gmail.com` through Gmail OAuth, or accepts a manual test email from its `Manual Trigger` branch. It chunks the email body with the same chunking strategy as the Wiki.js embedding index, embeds each email chunk with OpenAI, scores those embeddings against `public.kb_chunks`, selects up to the configured top-K distinct Wiki.js pages, fetches those pages, asks GPT to draft a reply, sends the reply through the Gmail API, and then marks the original message as `replied` or `failed` in Postgres. If the knowledge base has fewer than K pages, the workflow uses every available page instead of failing.
 
-The responder has two duplicate/old-mail guards:
+For manual end-to-end testing, run the workflow from the `Manual Trigger` node. The `Build manual test email` node creates a synthetic inbound email from `hello.wieland.collective+manual-test@gmail.com`, so the generated reply is sent back into the same Gmail mailbox instead of a real external contact.
 
-- The IMAP trigger is configured for `UNSEEN` messages and `trackLastMessageId`.
-- `public.email_responder_messages` has a unique `(mailbox, message_key)` constraint. The workflow must claim a message as `processing` before embeddings, GPT, or email sending can happen. After the SMTP send succeeds, the workflow updates the row to `replied`.
+The responder has three duplicate/old-mail guards:
+
+- The Gmail Trigger is configured for unread inbox mail and, once active, n8n tracks the last checked Gmail message timestamp for the trigger.
+- The Gmail query excludes messages sent by `hello.wieland.collective@gmail.com`, which avoids replying to the responder's own outbound mail.
+- `public.email_responder_messages` has a unique `(mailbox, message_key)` constraint. The workflow must claim a message as `processing` before embeddings, GPT, or email sending can happen. After the Gmail send succeeds, the workflow updates the row to `replied`; if Gmail rejects the send, it updates the row to `failed` and stores the error in `last_error`.
 
 `public.email_responder_state.respond_after` defines the old-email cutoff. Messages received before that timestamp are inserted as `skipped_old` and are not answered. Reset this baseline immediately before activating the responder if you want to guarantee that only messages received after activation can be answered:
 
@@ -109,11 +112,10 @@ docker exec postgres psql -U appuser -d freelance -c "UPDATE public.email_respon
 
 The responder expects these n8n credentials:
 
-- `Gmail hello.wieland.collective IMAP`: IMAP, host `imap.gmail.com`, port `993`, SSL/TLS enabled, user `hello.wieland.collective@gmail.com`
-- `Gmail hello.wieland.collective SMTP`: SMTP, host `smtp.gmail.com`, port `465`, SSL/TLS enabled, user `hello.wieland.collective@gmail.com`
+- `Gmail hello.wieland.collective OAuth2`: Gmail OAuth2 API credential connected to `hello.wieland.collective@gmail.com`
 - Existing `OpenAi account`, `Postgres account`, and `Wiki.js API token`
 
-Store the mailbox password or app password only in n8n credentials; do not put it in workflow JSON or Git.
+Google may hide App Passwords for organization accounts, Advanced Protection accounts, or accounts whose 2-Step Verification setup does not allow them. This workflow therefore uses Gmail OAuth instead of IMAP/SMTP password authentication. Create the Gmail OAuth2 credential in n8n, complete the Google consent flow for `hello.wieland.collective@gmail.com`, then select that credential on both `New email received` and `Send reply email` if n8n marks the imported placeholder as missing. Store OAuth client secrets only in n8n credentials; do not put them in workflow JSON or Git.
 
 Telemetry diagnostics and version-check notifications are disabled for `n8n`.
 
