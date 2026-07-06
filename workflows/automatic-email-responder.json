@@ -3,40 +3,10 @@
   "createdAt": "2026-06-29T00:00:00.000Z",
   "id": "AUTOEMAILRESPONDER01",
   "name": "automatic-email-responder",
-  "description": "Fetches new Gmail messages over OAuth or accepts a manual test email, claims them in Postgres, embeds email chunks, ranks distinct Wiki.js pages from the pgvector knowledge base, asks GPT to draft a reply, sends it through Gmail OAuth, and marks the message as replied or failed.",
+  "description": "Fetches new Gmail messages over IMAP or accepts a manual test email, claims them in Postgres, embeds email chunks, ranks distinct Wiki.js pages from the pgvector knowledge base, asks GPT to draft a reply, sends it through SMTP, and marks the message as replied or failed.",
   "active": false,
   "isArchived": false,
   "nodes": [
-    {
-      "parameters": {
-        "authentication": "oAuth2",
-        "event": "messageReceived",
-        "simple": false,
-        "filters": {
-          "q": "in:inbox -from:hello.wieland.collective@gmail.com",
-          "readStatus": "unread",
-          "includeSpamTrash": false,
-          "includeDrafts": false
-        },
-        "options": {
-          "downloadAttachments": false
-        }
-      },
-      "type": "n8n-nodes-base.gmailTrigger",
-      "typeVersion": 1.3,
-      "position": [
-        -2208,
-        0
-      ],
-      "id": "73b3f154-b263-442d-8913-eadf45ba95ba",
-      "name": "New email received",
-      "credentials": {
-        "gmailOAuth2": {
-          "id": "GMAIL_HELLO_WIELAND_OAUTH2",
-          "name": "Gmail hello.wieland.collective OAuth2"
-        }
-      }
-    },
     {
       "parameters": {},
       "type": "n8n-nodes-base.manualTrigger",
@@ -61,6 +31,33 @@
       ],
       "id": "61ed9ae4-d4c1-4ce0-a75a-2db695b103b0",
       "name": "Build manual test email"
+    },
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "format": "simple",
+        "downloadAttachments": false,
+        "options": {
+          "customEmailConfig": "[\"UNSEEN\"]",
+          "forceReconnect": 60,
+          "trackLastMessageId": true
+        }
+      },
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2.1,
+      "position": [
+        -2208,
+        0
+      ],
+      "id": "73b3f154-b263-442d-8913-eadf45ba95ba",
+      "name": "New email received",
+      "credentials": {
+        "imap": {
+          "id": "GMAIL_HELLO_WIELAND_IMAP",
+          "name": "Gmail hello.wieland.collective IMAP"
+        }
+      }
     },
     {
       "parameters": {
@@ -294,20 +291,20 @@
     },
     {
       "parameters": {
-        "authentication": "oAuth2",
-        "resource": "message",
+        "resource": "email",
         "operation": "send",
-        "sendTo": "={{ $json.to_email }}",
+        "fromEmail": "={{ $json.from_email }}",
+        "toEmail": "={{ $json.to_email }}",
         "subject": "={{ $json.reply_subject }}",
-        "emailType": "text",
-        "message": "={{ $json.reply_body }}",
+        "emailFormat": "text",
+        "text": "={{ $json.reply_body }}",
         "options": {
           "appendAttribution": false,
           "replyTo": "hello.wieland.collective@gmail.com"
         }
       },
-      "type": "n8n-nodes-base.gmail",
-      "typeVersion": 2.2,
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
       "position": [
         480,
         0
@@ -315,9 +312,9 @@
       "id": "f6180b2f-e776-4027-ab4a-3822a38fb74c",
       "name": "Send reply email",
       "credentials": {
-        "gmailOAuth2": {
-          "id": "GMAIL_HELLO_WIELAND_OAUTH2",
-          "name": "Gmail hello.wieland.collective OAuth2"
+        "smtp": {
+          "id": "GMAIL_HELLO_WIELAND_SMTP",
+          "name": "Gmail hello.wieland.collective SMTP"
         }
       },
       "continueOnFail": true
