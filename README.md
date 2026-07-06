@@ -102,6 +102,7 @@ The responder has three duplicate/old-mail guards:
 
 - The IMAP trigger is configured for `UNSEEN` messages and `trackLastMessageId`.
 - The normalizer skips messages sent by `hello.wieland.collective@gmail.com`, which avoids replying to the responder's own outbound mail.
+- The normalizer also blocks configured marketplace/newsletter senders before embeddings or GPT. Blocked messages are stored as `skipped_blocked`; edit `BLOCKED_SENDER_DOMAINS` and `BLOCKED_SENDER_KEYWORDS` in the `Normalize email` node to add or remove senders.
 - `public.email_responder_messages` has a unique `(mailbox, message_key)` constraint. The workflow must claim a message as `processing` before embeddings, GPT, or email sending can happen. After the SMTP send succeeds, the workflow updates the row to `replied`; if SMTP rejects the send, it updates the row to `failed` and stores the error in `last_error`.
 
 `public.email_responder_state.respond_after` defines the old-email cutoff. Messages received before that timestamp are inserted as `skipped_old` and are not answered. Reset this baseline immediately before activating the responder if you want to guarantee that only messages received after activation can be answered:

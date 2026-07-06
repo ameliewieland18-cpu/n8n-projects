@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS public.email_responder_messages (
   subject text,
   received_at timestamptz,
   status text NOT NULL CHECK (
-    status IN ('processing', 'replied', 'skipped_old', 'skipped_duplicate', 'failed')
+    status IN ('processing', 'replied', 'skipped_old', 'skipped_blocked', 'skipped_duplicate', 'failed')
   ),
   email_payload jsonb NOT NULL DEFAULT '{}'::jsonb,
   matched_pages jsonb,
